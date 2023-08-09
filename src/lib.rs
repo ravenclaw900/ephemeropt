@@ -1,5 +1,26 @@
 #![warn(clippy::pedantic, clippy::nursery, rust_2018_idioms)]
 
+//! An ephemeral `Option` for Rust. When created, this `EphemeralOption` takes an expiry time and a value,
+//! and the `EphemeralOption` will revert to `None` after the time runs out.
+//!
+//! ## Example
+//! ```
+//! use ephemeropt::EphemeralOption;
+//!
+//! let mut num_opt = EphemeralOption::new(0, std::time::Duration::from_secs(1));
+//! loop {
+//!     match num_opt.get() {
+//!         Some(&num) => println!("{num}"),
+//!         None => {
+//!             let prev_num = num_opt.get_expired().unwrap();
+//!             let num = num_opt.insert(prev_num + 1);
+//!             println!("{num}");
+//!         }
+//!     }
+//!     std::thread::sleep(std::time::Duration::from_millis(500));
+//! }
+//! ```
+
 use std::cell::Cell;
 use std::mem::{self, MaybeUninit};
 use std::time::{Duration, Instant};
@@ -135,7 +156,7 @@ impl<T> EphemeralOption<T> {
     /// without checking if it exists or not.
     ///
     /// It is almost always a better idea to use `get` or `get_expired` instead of this.
-    /// The only benefit of this is that it's a const fn, so it can be used in constant expressions.
+    /// The only benefit of this is that it's a `const fn`, so it can be used in constant expressions.
     ///
     /// # Safety
     /// Calling this function will cause undefined behavior if there is no value inside
