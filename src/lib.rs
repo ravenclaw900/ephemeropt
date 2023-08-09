@@ -85,7 +85,7 @@ impl<T> EphemeralOption<T> {
     /// ```
     /// # use ephemeropt::EphemeralOption;
     /// # use std::time::Duration;
-    /// let opt = EphemeralOption::new_empty(Duration::from_secs(2));
+    /// let opt: EphemeralOption<()> = EphemeralOption::new_empty(Duration::from_secs(2));
     /// ```
     pub fn new_empty(max_time: Duration) -> Self {
         Self {
@@ -338,12 +338,14 @@ impl<T> EphemeralOption<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::thread::sleep;
 
+    #[derive(PartialEq, Debug)]
     struct DropPrint;
 
     impl Drop for DropPrint {
         fn drop(&mut self) {
-            eprintln!("dropped");
+            println!("dropped");
         }
     }
 
@@ -351,7 +353,20 @@ mod tests {
     fn general_test() {
         let opt = EphemeralOption::new("hello", Duration::from_secs(1));
         assert_eq!(opt.get(), Some(&"hello"));
-        std::thread::sleep(Duration::from_secs(1));
+        sleep(Duration::from_secs(1));
         assert_eq!(opt.get(), None);
+        assert_eq!(opt.get_expired(), Some(&"hello"));
+
+        let mut opt = EphemeralOption::new(DropPrint, Duration::from_millis(500));
+        sleep(Duration::from_millis(500));
+        // Should print 'dropped'
+        assert_eq!(opt.take(), None);
+        opt.insert(DropPrint);
+        // Will technically also print dropped (new one created)
+        assert_eq!(opt.get(), Some(&DropPrint));
+        sleep(Duration::from_millis(500));
+        // Should also print dropped
+        let opt = opt.into_option();
+        assert_eq!(opt, None);
     }
 }
