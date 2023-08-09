@@ -228,8 +228,8 @@ impl<T> EphemeralOption<T> {
         self.inner.take()
     }
 
-    /// Replaces the value in the `EphemeralOption`, leaving the new value in it, without
-    /// deinitializing either one.
+    /// Replaces the value in the `EphemeralOption` with the new one and
+    /// returns the old value if present, without deinitializing either one.
     /// This resets the timer for when the value expires.
     ///
     /// This will drop the value currently in the `EphemeralOption` if it has expired.
@@ -252,6 +252,24 @@ impl<T> EphemeralOption<T> {
         self.inner.replace(val)
     }
 
+    /// Reset the timer for when the value expires.
+    ///
+    /// Note that this only requires `&self`, so it can be used without a mutable reference.
+    ///
+    /// ```no_run
+    /// # use ephemeropt::EphemeralOption;
+    /// # use std::time::Duration;
+    /// # use std::thread::sleep;
+    /// let mut opt = EphemeralOption::new(3, Duration::from_secs(2));
+    /// sleep(Duration::from_secs(2));
+    /// opt.reset_timer();
+    /// assert_eq!(opt.get(), Some(&3));
+    /// ```
+    // Should &mut self be used here? It isn't required (Cell), but makes more sense API-wise.
+    pub fn reset_timer(&mut self) {
+        self.expired.set(ExpiredState::new_not_expired());
+    }
+
     /// Convert an `EphemeralOption<T>` into an `Option<T>`.
     /// The `Option` will be `Some(T)` only if the value exists and has not expired,
     /// otherwise it will be `None`.
@@ -269,15 +287,6 @@ mod tests {
     use super::*;
     use mock_instant::MockClock;
 
-    #[derive(PartialEq, Debug)]
-    struct DropPrint;
-
-    impl Drop for DropPrint {
-        fn drop(&mut self) {
-            println!("dropped");
-        }
-    }
-
     #[test]
     fn general_test() {
         let opt = EphemeralOption::new("hello", Duration::from_secs(1));
@@ -287,16 +296,23 @@ mod tests {
         assert_eq!(opt.get(), None);
         assert_eq!(opt.get_expired(), Some(&"hello"));
 
-        let mut opt = EphemeralOption::new(DropPrint, Duration::from_millis(500));
+        let mut opt = EphemeralOption::new(3, Duration::from_millis(500));
         MockClock::advance(Duration::from_millis(501));
-        // Should print 'dropped'
+
         assert_eq!(opt.take(), None);
-        opt.insert(DropPrint);
-        // Will technically also print dropped (new one created)
-        assert_eq!(opt.get(), Some(&DropPrint));
+        opt.insert(2);
+        {
+            let num = opt.get_mut().unwrap();
+            *num = 1;
+        }
+        assert_eq!(opt.get(), Some(&1));
         MockClock::advance(Duration::from_millis(501));
-        // Should also print dropped
-        let opt = opt.into_option();
-        assert_eq!(opt, None);
+        {
+            let num = opt.get_mut_expired().unwrap();
+            *num = 2;
+        }
+        opt.reset_timer();
+        assert_eq!(opt.replace(3), Some(2));
+        assert_eq!(opt.get_or_insert(0), &mut 3);
     }
 }
