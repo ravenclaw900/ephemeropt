@@ -36,10 +36,19 @@ fn system_task() -> mpsc::Sender<SystemRequest> {
 async fn main() {
     let sys_tx = system_task();
 
-    loop {
-        let (resp_tx, resp_rx) = oneshot::channel();
-        sys_tx.send(SystemRequest::Cpu(resp_tx)).await.unwrap();
-        println!("CPU usage: {}", resp_rx.await.unwrap());
-        tokio::time::sleep(Duration::from_millis(250)).await;
+    for _ in 0..3 {
+        let sys_tx = sys_tx.clone();
+        tokio::spawn(async move {
+            loop {
+                let (resp_tx, resp_rx) = oneshot::channel();
+                sys_tx.send(SystemRequest::Cpu(resp_tx)).await.unwrap();
+                println!("CPU usage: {}", resp_rx.await.unwrap());
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
