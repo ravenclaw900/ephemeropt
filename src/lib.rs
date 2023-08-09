@@ -343,7 +343,7 @@ impl<T> EphemeralOption<T> {
         None
     }
 
-    /// Convert an `EphemeralOption<T>` into an `Option<T>`
+    /// Convert an `EphemeralOption<T>` into an `Option<T>`.
     /// The `Option` will be `Some(T)` only if the value exists and has not expired,
     /// otherwise it will be `None`.
     pub fn into_option(mut self) -> Option<T> {
