@@ -1,8 +1,11 @@
+#![warn(clippy::pedantic, clippy::nursery, rust_2018_idioms)]
+
 use std::cell::Cell;
 use std::mem::{self, MaybeUninit};
 use std::time::{Duration, Instant};
 
 #[derive(Debug)]
+#[must_use]
 pub struct TimedOption<T> {
     exists: Cell<bool>,
     inner: MaybeUninit<T>,
@@ -70,6 +73,19 @@ impl<T> TimedOption<T> {
         self.inner.write(val);
         self.exists.set(true);
         self.start_time = Instant::now();
+
+        // Has to exist, because it was just set
+        unsafe { self.inner.assume_init_mut() }
+    }
+
+    pub fn get_or_insert(&mut self, val: T) -> &mut T {
+        self.check_time();
+        if !self.exists.get() {
+            self.inner.write(val);
+            self.exists.set(true);
+            self.start_time = Instant::now();
+        }
+
         // Has to exist, because it was just set
         unsafe { self.inner.assume_init_mut() }
     }
@@ -107,13 +123,5 @@ mod tests {
         assert_eq!(opt.get(), Some(&"hello"));
         std::thread::sleep(Duration::from_secs(1));
         assert_eq!(opt.get(), None);
-    }
-
-    #[test]
-    fn unsafe_test() {
-        let mut opt: TimedOption<bool> = TimedOption::new(false, Duration::from_secs(1));
-        let test = opt.get();
-        opt.insert(true);
-        println!("{:?}", test);
     }
 }
