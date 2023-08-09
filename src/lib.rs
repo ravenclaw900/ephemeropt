@@ -8,7 +8,8 @@
 //! use ephemeropt::EphemeralOption;
 //!
 //! let mut num_opt = EphemeralOption::new(0, std::time::Duration::from_secs(1));
-//! loop {
+//! // Will only go up to 10, because every other call will be cached
+//! for _ in 0..=20 {
 //!     match num_opt.get() {
 //!         Some(&num) => println!("{num}"),
 //!         None => {
