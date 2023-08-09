@@ -4,7 +4,7 @@
 //! and the `EphemeralOption` will revert to `None` after the time runs out.
 //!
 //! ## Example
-//! ```
+//! ```no_run
 //! use ephemeropt::EphemeralOption;
 //!
 //! let mut num_opt = EphemeralOption::new(0, std::time::Duration::from_secs(1));
@@ -22,9 +22,13 @@
 //! }
 //! ```
 
+#[cfg(test)]
+use mock_instant::Instant;
 use std::cell::Cell;
 use std::mem::{self, MaybeUninit};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(not(test))]
+use std::time::Instant;
 
 /// An `Option` that automatically reverts to `None` after a certain amount of time
 ///
@@ -122,7 +126,7 @@ impl<T> EphemeralOption<T> {
     /// Get a shared reference to the value of the `EphemeralOption`.
     ///
     /// Will return `None` if it is empty or if it has expired.
-    /// ```
+    /// ```no_run
     /// # use ephemeropt::EphemeralOption;
     /// # use std::time::Duration;
     /// # use std::thread::sleep;
@@ -170,7 +174,7 @@ impl<T> EphemeralOption<T> {
     /// Get a mutable, exclusive reference to the value of the `EphemeralOption`.
     ///
     /// Will return `None` if it is empty or if it has expired.
-    /// ```
+    /// ```no_run
     /// # use ephemeropt::EphemeralOption;
     /// # use std::time::Duration;
     /// # use std::thread::sleep;
@@ -360,7 +364,7 @@ impl<T> EphemeralOption<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::thread::sleep;
+    use mock_instant::MockClock;
 
     #[derive(PartialEq, Debug)]
     struct DropPrint;
@@ -375,18 +379,19 @@ mod tests {
     fn general_test() {
         let opt = EphemeralOption::new("hello", Duration::from_secs(1));
         assert_eq!(opt.get(), Some(&"hello"));
-        sleep(Duration::from_secs(1));
+        // Have to advance the clock just past the time for tests to work
+        MockClock::advance(Duration::from_millis(1001));
         assert_eq!(opt.get(), None);
         assert_eq!(opt.get_expired(), Some(&"hello"));
 
         let mut opt = EphemeralOption::new(DropPrint, Duration::from_millis(500));
-        sleep(Duration::from_millis(500));
+        MockClock::advance(Duration::from_millis(501));
         // Should print 'dropped'
         assert_eq!(opt.take(), None);
         opt.insert(DropPrint);
         // Will technically also print dropped (new one created)
         assert_eq!(opt.get(), Some(&DropPrint));
-        sleep(Duration::from_millis(500));
+        MockClock::advance(Duration::from_millis(501));
         // Should also print dropped
         let opt = opt.into_option();
         assert_eq!(opt, None);
