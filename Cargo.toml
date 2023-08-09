@@ -8,8 +8,6 @@ description = "An ephemeral Option that reverts to None after some time"
 keywords = ["timed", "option", "ephemeral", "cache"]
 categories = ["caching", "rust-patterns"]
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [dependencies]
 
 [dev-dependencies]
