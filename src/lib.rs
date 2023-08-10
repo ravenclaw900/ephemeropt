@@ -49,7 +49,7 @@ impl ExpiredState {
 
 /// An `Option` that automatically reverts to `None` after a certain amount of time
 ///
-/// Note: the value in the `EphemeralOption` is not dropped when time expires,
+/// The value in the `EphemeralOption` is not dropped when time expires,
 /// only when it is overwritten or the `EphemeralOption` itself is dropped
 #[derive(Debug)]
 #[must_use]
@@ -253,8 +253,6 @@ impl<T> EphemeralOption<T> {
     }
 
     /// Reset the timer for when the value expires.
-    ///
-    /// Note that this only requires `&self`, so it can be used without a mutable reference.
     ///
     /// ```no_run
     /// # use ephemeropt::EphemeralOption;
