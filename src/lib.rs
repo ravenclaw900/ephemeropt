@@ -30,6 +30,8 @@ use std::time::Duration;
 use std::time::Instant;
 
 // Instant is Copy, so there should be no problems with this also being Copy
+// Every time it copies out of the cell, it does copy 16 bytes vs. 1 byte
+// With modern system performance, this shouldn't matter
 #[derive(Debug, Clone, Copy)]
 enum ExpiredState {
     NotExpired(Instant),
@@ -263,8 +265,7 @@ impl<T> EphemeralOption<T> {
     /// opt.reset_timer();
     /// assert_eq!(opt.get(), Some(&3));
     /// ```
-    // Should &mut self be used here? It isn't required (Cell), but makes more sense API-wise.
-    pub fn reset_timer(&mut self) {
+    pub fn reset_timer(&self) {
         self.expired.set(ExpiredState::new_not_expired());
     }
 
