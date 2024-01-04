@@ -386,19 +386,15 @@ impl<T> EphemeralOption<T> {
     pub fn into_option(mut self) -> Option<T> {
         self.check_time();
 
-        match self.state.get() {
-            ValueState::NoValue => None,
-            ValueState::Expired => {
-                // SAFETY: even though value is expired, it exists
-                unsafe { self.inner.assume_init_drop() };
-                None
-            }
-            ValueState::NotExpired(_) => {
-                let val = mem::replace(&mut self.inner, MaybeUninit::uninit());
-                // SAFETY: since value isn't expired, it has to exist
-                unsafe { Some(val.assume_init()) }
-            }
+        if self.state.get().is_not_expired() {
+            let val = mem::replace(&mut self.inner, MaybeUninit::uninit());
+            self.state.set(ValueState::NoValue);
+            // SAFETY: since value isn't expired, it has to exist
+            return unsafe { Some(val.assume_init()) };
         }
+
+        // Don't worry about dropping the expired value, since that's handled by the `Drop` impl
+        None
     }
 }
 
@@ -434,5 +430,9 @@ mod tests {
         opt.reset_timer();
         assert_eq!(opt.replace(3), Some(2));
         assert_eq!(opt.get_or_insert(0), &mut 3);
+
+        let opt = EphemeralOption::new(vec![1, 2, 3], Duration::from_millis(1));
+        // MockClock::advance(Duration::from_millis(2));
+        assert_eq!(opt.into_option(), Some(vec![1, 2, 3]));
     }
 }
