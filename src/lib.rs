@@ -74,6 +74,16 @@ pub struct EphemeralOption<T> {
     max_time: Duration,
 }
 
+impl<T> Drop for EphemeralOption<T> {
+    fn drop(&mut self) {
+        // Specifically drop inner value if it exists
+        if !self.state.get().is_no_value() {
+            // SAFETY: just checked that value exists
+            unsafe { self.inner.assume_init_drop() }
+        }
+    }
+}
+
 // Local functions
 impl<T> EphemeralOption<T> {
     fn check_time(&self) {
@@ -138,6 +148,19 @@ impl<T> EphemeralOption<T> {
     }
 
     /// Get a shared reference to the value of the `EphemeralOption`
+    /// without checking if it exists or not.
+    ///
+    /// It is almost always a better idea to use `get` or `get_expired` instead of this.
+    ///
+    /// # Safety
+    /// Calling this function will cause undefined behavior if there is no value inside
+    /// of the `EphemeralOption`.
+    pub const unsafe fn get_unchecked(&self) -> &T {
+        // Don't unnecessarily check time because it isn't used here
+        self.inner.assume_init_ref()
+    }
+
+    /// Get a shared reference to the value of the `EphemeralOption`
     /// regardless of whether it has expired or not.
     ///
     /// Will only return `None` if the value does not exist.
@@ -173,6 +196,19 @@ impl<T> EphemeralOption<T> {
         }
         // SAFETY: checked to make sure value isn't expired
         unsafe { Some(self.inner.assume_init_mut()) }
+    }
+
+    /// Get an exclusive, mutable reference to the value of the
+    /// `EphemeralOption` without checking if it exists or not.
+    ///
+    /// It is almost always a better idea to use `get_mut` or `get_mut_expired` instead of this.
+    ///
+    /// # Safety
+    /// Calling this function will cause undefined behavior if there is no value inside
+    /// of the `EphemeralOption`.
+    pub unsafe fn get_mut_unchecked(&mut self) -> &mut T {
+        // Don't unnecessarily check time because it isn't used here
+        self.inner.assume_init_mut()
     }
 
     /// Get a mutable, exclusive reference to the value of the `EphemeralOption`
@@ -350,8 +386,9 @@ impl<T> EphemeralOption<T> {
                 None
             }
             ValueState::NotExpired(_) => {
+                let val = mem::replace(&mut self.inner, MaybeUninit::uninit());
                 // SAFETY: since value isn't expired, it has to exist
-                unsafe { Some(self.inner.assume_init()) }
+                unsafe { Some(val.assume_init()) }
             }
         }
     }
