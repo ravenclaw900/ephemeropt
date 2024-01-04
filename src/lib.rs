@@ -25,6 +25,7 @@
 #[cfg(test)]
 use mock_instant::Instant;
 use std::cell::Cell;
+use std::mem::{self, MaybeUninit};
 use std::time::Duration;
 #[cfg(not(test))]
 use std::time::Instant;
@@ -33,15 +34,27 @@ use std::time::Instant;
 // Every time it copies out of the cell, it does copy 16 bytes vs. 1 byte
 // With modern system performance, this shouldn't matter
 #[derive(Debug, Clone, Copy)]
-enum ExpiredState {
+enum ValueState {
+    NoValue,
     NotExpired(Instant),
     Expired,
 }
 
-impl ExpiredState {
+impl ValueState {
+    // Convenience methods
+    #[inline]
+    const fn is_not_expired(&self) -> bool {
+        matches!(self, Self::NotExpired(_))
+    }
+
     #[inline]
     const fn is_expired(&self) -> bool {
         matches!(self, Self::Expired)
+    }
+
+    #[inline]
+    const fn is_no_value(&self) -> bool {
+        matches!(self, Self::NoValue)
     }
 
     fn new_not_expired() -> Self {
@@ -56,18 +69,18 @@ impl ExpiredState {
 #[derive(Debug)]
 #[must_use]
 pub struct EphemeralOption<T> {
-    expired: Cell<ExpiredState>,
-    inner: Option<T>,
+    state: Cell<ValueState>,
+    inner: MaybeUninit<T>,
     max_time: Duration,
 }
 
 // Local functions
 impl<T> EphemeralOption<T> {
     fn check_time(&self) {
-        if let ExpiredState::NotExpired(start_time) = self.expired.get() {
+        if let ValueState::NotExpired(start_time) = self.state.get() {
             let cur_time = Instant::now();
             if cur_time.duration_since(start_time) > self.max_time {
-                self.expired.set(ExpiredState::Expired);
+                self.state.set(ValueState::Expired);
             }
         }
     }
@@ -82,8 +95,8 @@ impl<T> EphemeralOption<T> {
     /// ```
     pub fn new(val: T, max_time: Duration) -> Self {
         Self {
-            expired: Cell::new(ExpiredState::new_not_expired()),
-            inner: Some(val),
+            state: Cell::new(ValueState::new_not_expired()),
+            inner: MaybeUninit::new(val),
             max_time,
         }
     }
@@ -96,8 +109,8 @@ impl<T> EphemeralOption<T> {
     /// ```
     pub const fn new_empty(max_time: Duration) -> Self {
         Self {
-            expired: Cell::new(ExpiredState::Expired),
-            inner: None,
+            state: Cell::new(ValueState::NoValue),
+            inner: MaybeUninit::uninit(),
             max_time,
         }
     }
@@ -116,19 +129,25 @@ impl<T> EphemeralOption<T> {
     /// ```
     pub fn get(&self) -> Option<&T> {
         self.check_time();
-        if self.expired.get().is_expired() {
+
+        if self.state.get().is_expired() {
             return None;
         }
-        self.inner.as_ref()
+        // SAFETY: checked to make sure value isn't expired
+        unsafe { Some(self.inner.assume_init_ref()) }
     }
 
     /// Get a shared reference to the value of the `EphemeralOption`
     /// regardless of whether it has expired or not.
     ///
     /// Will only return `None` if the value does not exist.
-    pub const fn get_expired(&self) -> Option<&T> {
+    pub fn get_expired(&self) -> Option<&T> {
         // Don't unnecessarily check time because it isn't used here
-        self.inner.as_ref()
+        if self.state.get().is_no_value() {
+            return None;
+        }
+        // SAFETY: checked to make sure value exists
+        unsafe { Some(self.inner.assume_init_ref()) }
     }
 
     /// Get a mutable, exclusive reference to the value of the `EphemeralOption`.
@@ -148,10 +167,12 @@ impl<T> EphemeralOption<T> {
     /// ```
     pub fn get_mut(&mut self) -> Option<&mut T> {
         self.check_time();
-        if self.expired.get().is_expired() {
+
+        if self.state.get().is_expired() {
             return None;
         }
-        self.inner.as_mut()
+        // SAFETY: checked to make sure value isn't expired
+        unsafe { Some(self.inner.assume_init_mut()) }
     }
 
     /// Get a mutable, exclusive reference to the value of the `EphemeralOption`
@@ -160,7 +181,11 @@ impl<T> EphemeralOption<T> {
     /// Will only return `None` if the value does not exist.
     pub fn get_mut_expired(&mut self) -> Option<&mut T> {
         // Don't unnecessarily check time because it isn't used here
-        self.inner.as_mut()
+        if self.state.get().is_no_value() {
+            return None;
+        }
+        // SAFETY: checked to make sure value exists
+        unsafe { Some(self.inner.assume_init_mut()) }
     }
 
     /// Overwrite the value in the `EphemeralOption`.
@@ -179,8 +204,13 @@ impl<T> EphemeralOption<T> {
     /// ```
     pub fn insert(&mut self, val: T) -> &mut T {
         // No check_time() here because the value is immediately overwritten and the time reset
-        self.expired.set(ExpiredState::new_not_expired());
-        self.inner.insert(val)
+        // Make sure that value exists, regardless of whether it's expired
+        if !self.state.get().is_no_value() {
+            // SAFETY: just checked that value exists
+            unsafe { self.inner.assume_init_drop() }
+        }
+        self.state.set(ValueState::new_not_expired());
+        self.inner.write(val)
     }
 
     /// Overwrite the value in the `EphemeralOption` if it is currently `None`.
@@ -188,7 +218,7 @@ impl<T> EphemeralOption<T> {
     ///
     /// If a new value is inserted, this resets the timer for when it expires.
     ///
-    /// For convenience, this returns a mutable reference to the inserted value.
+    /// For convenience, this returns a mutable reference to the contained value.
     ///
     /// ```
     /// # use ephemeropt::EphemeralOption;
@@ -199,14 +229,22 @@ impl<T> EphemeralOption<T> {
     /// ```
     pub fn get_or_insert(&mut self, val: T) -> &mut T {
         self.check_time();
-        // Return value if not expired and value exists
-        if !self.expired.get().is_expired() {
-            if let Some(ref mut inner) = self.inner {
-                return inner;
-            }
+
+        let state = self.state.get();
+
+        // If value isn't expired, immediately return it
+        if state.is_not_expired() {
+            // SAFETY: value is not expired, therefore has to exist
+            return unsafe { self.inner.assume_init_mut() };
         }
-        // Otherwise set new value (use insert because it would be the same implementation anyway)
-        self.insert(val)
+
+        // Otherwise, drop value if it is expired, and insert new one
+        if state.is_expired() {
+            // SAFETY: though it is expired, value exists
+            unsafe { self.inner.assume_init_drop() };
+        }
+        self.state.set(ValueState::new_not_expired());
+        self.inner.write(val)
     }
 
     /// Take the value out of the `EphemeralOption`, leaving it empty.
@@ -223,11 +261,25 @@ impl<T> EphemeralOption<T> {
     /// ```
     pub fn take(&mut self) -> Option<T> {
         self.check_time();
-        // Remove value if expired
-        if self.expired.get().is_expired() {
-            self.inner = None;
+
+        // Vastly different implementations depending on state, so just match on everything here
+        match self.state.get() {
+            ValueState::NoValue => None,
+            // If value is expired, drop it in place, but still set NoValue state
+            ValueState::Expired => {
+                self.state.set(ValueState::NoValue);
+                // SAFETY: even though value is expired, it exists
+                unsafe { self.inner.assume_init_drop() };
+                None
+            }
+            ValueState::NotExpired(_) => {
+                let val = mem::replace(&mut self.inner, MaybeUninit::uninit());
+                self.state.set(ValueState::NoValue);
+                // SAFETY: value isn't expired, therefore has to exist
+                let val = unsafe { val.assume_init() };
+                Some(val)
+            }
         }
-        self.inner.take()
     }
 
     /// Replaces the value in the `EphemeralOption` with the new one and
@@ -246,12 +298,27 @@ impl<T> EphemeralOption<T> {
     /// ```
     pub fn replace(&mut self, val: T) -> Option<T> {
         self.check_time();
-        // Remove value if expired
-        if self.expired.get().is_expired() {
-            self.inner = None;
+
+        let state = self.state.get();
+
+        if state.is_not_expired() {
+            let old_val = mem::replace(&mut self.inner, MaybeUninit::new(val));
+            self.state.set(ValueState::new_not_expired());
+            // SAFETY: value isn't expired, therefore has to exist
+            let old_val = unsafe { old_val.assume_init() };
+            return Some(old_val);
         }
-        self.expired.set(ExpiredState::new_not_expired());
-        self.inner.replace(val)
+
+        // Otherwise, drop value if it is expired, and insert new one
+        if state.is_expired() {
+            // SAFETY: even though value is expired, it exists
+            unsafe { self.inner.assume_init_drop() };
+        }
+
+        self.state.set(ValueState::new_not_expired());
+        self.inner.write(val);
+
+        None
     }
 
     /// Reset the timer for when the value expires.
@@ -266,7 +333,7 @@ impl<T> EphemeralOption<T> {
     /// assert_eq!(opt.get(), Some(&3));
     /// ```
     pub fn reset_timer(&self) {
-        self.expired.set(ExpiredState::new_not_expired());
+        self.state.set(ValueState::new_not_expired());
     }
 
     /// Convert an `EphemeralOption<T>` into an `Option<T>`.
@@ -274,10 +341,19 @@ impl<T> EphemeralOption<T> {
     /// otherwise it will be `None`.
     pub fn into_option(mut self) -> Option<T> {
         self.check_time();
-        if self.expired.get().is_expired() {
-            self.inner = None;
+
+        match self.state.get() {
+            ValueState::NoValue => None,
+            ValueState::Expired => {
+                // SAFETY: even though value is expired, it exists
+                unsafe { self.inner.assume_init_drop() };
+                None
+            }
+            ValueState::NotExpired(_) => {
+                // SAFETY: since value isn't expired, it has to exist
+                unsafe { Some(self.inner.assume_init()) }
+            }
         }
-        self.inner
     }
 }
 
