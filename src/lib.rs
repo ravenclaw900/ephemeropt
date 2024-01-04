@@ -57,6 +57,11 @@ impl ValueState {
         matches!(self, Self::NoValue)
     }
 
+    #[inline]
+    const fn exists(&self) -> bool {
+        !self.is_no_value()
+    }
+
     fn new_not_expired() -> Self {
         Self::NotExpired(Instant::now())
     }
@@ -77,7 +82,7 @@ pub struct EphemeralOption<T> {
 impl<T> Drop for EphemeralOption<T> {
     fn drop(&mut self) {
         // Specifically drop inner value if it exists
-        if !self.state.get().is_no_value() {
+        if self.state.get().exists() {
             // SAFETY: just checked that value exists
             unsafe { self.inner.assume_init_drop() }
         }
@@ -241,7 +246,7 @@ impl<T> EphemeralOption<T> {
     pub fn insert(&mut self, val: T) -> &mut T {
         // No check_time() here because the value is immediately overwritten and the time reset
         // Make sure that value exists, regardless of whether it's expired
-        if !self.state.get().is_no_value() {
+        if self.state.get().exists() {
             // SAFETY: just checked that value exists
             unsafe { self.inner.assume_init_drop() }
         }
@@ -369,7 +374,10 @@ impl<T> EphemeralOption<T> {
     /// assert_eq!(opt.get(), Some(&3));
     /// ```
     pub fn reset_timer(&self) {
-        self.state.set(ValueState::new_not_expired());
+        // Only reset the timer if the value actually exists
+        if self.state.get().exists() {
+            self.state.set(ValueState::new_not_expired());
+        }
     }
 
     /// Convert an `EphemeralOption<T>` into an `Option<T>`.
