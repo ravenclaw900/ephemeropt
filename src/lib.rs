@@ -95,6 +95,28 @@ impl<T> Drop for EphemeralOption<T> {
     }
 }
 
+impl<T> Clone for EphemeralOption<T>
+where
+    T: Clone,
+{
+    fn clone(&self) -> Self {
+        // This step is necessary becasuse MaybeUninit only impls Clone if T is Copy, because it can't know if T is initialized
+        let new_inner = if self.state.get().exists() {
+            // SAFETY: just checked that value exists
+            let val = unsafe { self.inner.assume_init_ref() };
+            MaybeUninit::new(val.clone())
+        } else {
+            MaybeUninit::uninit()
+        };
+
+        Self {
+            state: self.state.clone(),
+            inner: new_inner,
+            max_time: self.max_time,
+        }
+    }
+}
+
 // Local functions
 impl<T> EphemeralOption<T> {
     fn check_time(&self) {
