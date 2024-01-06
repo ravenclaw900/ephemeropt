@@ -33,6 +33,12 @@ use std::time::Instant;
 // Instant is Copy, so there should be no problems with this also being Copy
 // Every time it copies out of the cell, it does copy 16 bytes vs. 1 byte
 // With modern system performance, this shouldn't matter
+//
+// This technically can be viewed in 2 different configurations
+// 1. It either doesn't have a value (NoValue) or it does (Not/Expired)
+// Having a value is necessary for no undefined behavior when reading the value
+// 2. The value is expired or not
+// The value exists here, but we very often just want to check for a not expired value
 #[derive(Debug, Clone, Copy)]
 enum ValueState {
     NoValue,
@@ -99,6 +105,19 @@ impl<T> EphemeralOption<T> {
             }
         }
     }
+
+    // SAFETY: Only call this function when you're sure the value exists
+    unsafe fn extract_value(&mut self) -> T {
+        self.state.set(ValueState::NoValue);
+        let val = mem::replace(&mut self.inner, MaybeUninit::uninit());
+        unsafe { val.assume_init() }
+    }
+
+    // Note: doesn't drop any previous value
+    fn insert_value(&mut self, val: T) -> &mut T {
+        self.state.set(ValueState::new_not_expired());
+        self.inner.write(val)
+    }
 }
 
 impl<T> EphemeralOption<T> {
@@ -145,11 +164,12 @@ impl<T> EphemeralOption<T> {
     pub fn get(&self) -> Option<&T> {
         self.check_time();
 
-        if self.state.get().is_expired() {
-            return None;
+        if self.state.get().is_not_expired() {
+            // SAFETY: checked to make sure value isn't expired
+            return unsafe { Some(self.inner.assume_init_ref()) };
         }
-        // SAFETY: checked to make sure value isn't expired
-        unsafe { Some(self.inner.assume_init_ref()) }
+
+        None
     }
 
     /// Get a shared reference to the value of the `EphemeralOption`
@@ -171,11 +191,12 @@ impl<T> EphemeralOption<T> {
     /// Will only return `None` if the value does not exist.
     pub fn get_expired(&self) -> Option<&T> {
         // Don't unnecessarily check time because it isn't used here
-        if self.state.get().is_no_value() {
-            return None;
+        if self.state.get().exists() {
+            // SAFETY: checked to make sure value exists
+            return unsafe { Some(self.inner.assume_init_ref()) };
         }
-        // SAFETY: checked to make sure value exists
-        unsafe { Some(self.inner.assume_init_ref()) }
+
+        None
     }
 
     /// Get a mutable, exclusive reference to the value of the `EphemeralOption`.
@@ -196,11 +217,12 @@ impl<T> EphemeralOption<T> {
     pub fn get_mut(&mut self) -> Option<&mut T> {
         self.check_time();
 
-        if self.state.get().is_expired() {
-            return None;
+        if self.state.get().is_not_expired() {
+            // SAFETY: checked to make sure value isn't expired
+            return unsafe { Some(self.inner.assume_init_mut()) };
         }
-        // SAFETY: checked to make sure value isn't expired
-        unsafe { Some(self.inner.assume_init_mut()) }
+
+        None
     }
 
     /// Get an exclusive, mutable reference to the value of the
@@ -222,11 +244,12 @@ impl<T> EphemeralOption<T> {
     /// Will only return `None` if the value does not exist.
     pub fn get_mut_expired(&mut self) -> Option<&mut T> {
         // Don't unnecessarily check time because it isn't used here
-        if self.state.get().is_no_value() {
-            return None;
+        if self.state.get().exists() {
+            // SAFETY: checked to make sure value exists
+            return unsafe { Some(self.inner.assume_init_mut()) };
         }
-        // SAFETY: checked to make sure value exists
-        unsafe { Some(self.inner.assume_init_mut()) }
+
+        None
     }
 
     /// Overwrite the value in the `EphemeralOption`.
@@ -250,8 +273,8 @@ impl<T> EphemeralOption<T> {
             // SAFETY: just checked that value exists
             unsafe { self.inner.assume_init_drop() }
         }
-        self.state.set(ValueState::new_not_expired());
-        self.inner.write(val)
+
+        self.insert_value(val)
     }
 
     /// Overwrite the value in the `EphemeralOption` if it is currently `None`.
@@ -284,8 +307,7 @@ impl<T> EphemeralOption<T> {
             // SAFETY: though it is expired, value exists
             unsafe { self.inner.assume_init_drop() };
         }
-        self.state.set(ValueState::new_not_expired());
-        self.inner.write(val)
+        self.insert_value(val)
     }
 
     /// Take the value out of the `EphemeralOption`, leaving it empty.
@@ -314,10 +336,8 @@ impl<T> EphemeralOption<T> {
                 None
             }
             ValueState::NotExpired(_) => {
-                let val = mem::replace(&mut self.inner, MaybeUninit::uninit());
-                self.state.set(ValueState::NoValue);
                 // SAFETY: value isn't expired, therefore has to exist
-                let val = unsafe { val.assume_init() };
+                let val = unsafe { self.extract_value() };
                 Some(val)
             }
         }
@@ -343,6 +363,7 @@ impl<T> EphemeralOption<T> {
         let state = self.state.get();
 
         if state.is_not_expired() {
+            // Optimize by not doing write later, but instead replacing directly with new value
             let old_val = mem::replace(&mut self.inner, MaybeUninit::new(val));
             self.state.set(ValueState::new_not_expired());
             // SAFETY: value isn't expired, therefore has to exist
@@ -356,8 +377,7 @@ impl<T> EphemeralOption<T> {
             unsafe { self.inner.assume_init_drop() };
         }
 
-        self.state.set(ValueState::new_not_expired());
-        self.inner.write(val);
+        self.insert_value(val);
 
         None
     }
@@ -387,10 +407,9 @@ impl<T> EphemeralOption<T> {
         self.check_time();
 
         if self.state.get().is_not_expired() {
-            let val = mem::replace(&mut self.inner, MaybeUninit::uninit());
-            self.state.set(ValueState::NoValue);
             // SAFETY: since value isn't expired, it has to exist
-            return unsafe { Some(val.assume_init()) };
+            let val = unsafe { self.extract_value() };
+            return Some(val);
         }
 
         // Don't worry about dropping the expired value, since that's handled by the `Drop` impl
@@ -404,35 +423,144 @@ mod tests {
     use mock_instant::MockClock;
 
     #[test]
-    fn general_test() {
-        let opt = EphemeralOption::new("hello", Duration::from_secs(1));
-        assert_eq!(opt.get(), Some(&"hello"));
-        // Have to advance the clock just past the time for tests to work
-        MockClock::advance(Duration::from_millis(1001));
-        assert_eq!(opt.get(), None);
-        assert_eq!(opt.get_expired(), Some(&"hello"));
+    fn test_empty_get() {
+        let mut opt: EphemeralOption<u8> = EphemeralOption::new_empty(Duration::from_secs(1));
 
-        let mut opt = EphemeralOption::new(3, Duration::from_millis(500));
-        MockClock::advance(Duration::from_millis(501));
+        assert_eq!(opt.get(), None);
+        assert_eq!(opt.get_mut(), None);
+        assert_eq!(opt.get_expired(), None);
+        assert_eq!(opt.get_mut_expired(), None);
+
+        MockClock::advance(Duration::from_millis(2001));
+
+        assert_eq!(opt.get(), None);
+        assert_eq!(opt.get_mut(), None);
+        assert_eq!(opt.get_expired(), None);
+        assert_eq!(opt.get_mut_expired(), None);
+    }
+
+    #[test]
+    fn test_expired_get() {
+        let mut opt: EphemeralOption<()> = EphemeralOption::new((), Duration::from_secs(1));
+
+        MockClock::advance(Duration::from_millis(1001));
+
+        assert_eq!(opt.get(), None);
+        assert_eq!(opt.get_mut(), None);
+        assert_eq!(opt.get_expired(), Some(&()));
+        assert_eq!(opt.get_mut_expired(), Some(&mut ()));
+    }
+
+    #[test]
+    fn test_get() {
+        let mut opt: EphemeralOption<u8> = EphemeralOption::new(2, Duration::from_secs(1));
+
+        assert_eq!(opt.get(), Some(&2));
+        assert_eq!(opt.get_mut(), Some(&mut 2));
+        assert_eq!(opt.get_expired(), Some(&2));
+        assert_eq!(opt.get_mut_expired(), Some(&mut 2));
+    }
+
+    #[test]
+    fn test_into_option_empty() {
+        let opt: EphemeralOption<Vec<u8>> = EphemeralOption::new_empty(Duration::from_secs(1));
+
+        assert_eq!(opt.into_option(), None);
+    }
+
+    #[test]
+    fn test_into_option_expired() {
+        let opt: EphemeralOption<Vec<u8>> =
+            EphemeralOption::new(vec![1, 2, 3], Duration::from_secs(1));
+
+        MockClock::advance(Duration::from_millis(1001));
+
+        assert_eq!(opt.into_option(), None);
+    }
+
+    #[test]
+    fn test_into_option() {
+        let opt: EphemeralOption<Vec<u8>> =
+            EphemeralOption::new(vec![1, 2, 3], Duration::from_secs(1));
+
+        assert_eq!(opt.into_option(), Some(vec![1, 2, 3]));
+    }
+
+    #[test]
+    fn test_take_empty() {
+        let mut opt: EphemeralOption<u8> = EphemeralOption::new_empty(Duration::from_secs(1));
 
         assert_eq!(opt.take(), None);
-        opt.insert(2);
-        {
-            let num = opt.get_mut().unwrap();
-            *num = 1;
-        }
-        assert_eq!(opt.get(), Some(&1));
-        MockClock::advance(Duration::from_millis(501));
-        {
-            let num = opt.get_mut_expired().unwrap();
-            *num = 2;
-        }
-        opt.reset_timer();
-        assert_eq!(opt.replace(3), Some(2));
-        assert_eq!(opt.get_or_insert(0), &mut 3);
+        assert_eq!(opt.get(), None);
+    }
 
-        let opt = EphemeralOption::new(vec![1, 2, 3], Duration::from_millis(1));
-        // MockClock::advance(Duration::from_millis(2));
-        assert_eq!(opt.into_option(), Some(vec![1, 2, 3]));
+    #[test]
+    fn test_take_expired() {
+        let mut opt: EphemeralOption<u8> = EphemeralOption::new(2, Duration::from_secs(1));
+
+        MockClock::advance(Duration::from_millis(1001));
+
+        assert_eq!(opt.take(), None);
+        assert_eq!(opt.get(), None);
+    }
+
+    #[test]
+    fn test_take() {
+        let mut opt: EphemeralOption<u8> = EphemeralOption::new(2, Duration::from_secs(1));
+
+        assert_eq!(opt.take(), Some(2));
+        assert_eq!(opt.get(), None);
+    }
+
+    #[test]
+    fn test_goi_empty() {
+        let mut opt: EphemeralOption<u8> = EphemeralOption::new_empty(Duration::from_secs(1));
+
+        assert_eq!(opt.get_or_insert(2), &mut 2);
+        assert_eq!(opt.get(), Some(&2));
+    }
+
+    #[test]
+    fn test_goi_expired() {
+        let mut opt: EphemeralOption<u8> = EphemeralOption::new(1, Duration::from_secs(1));
+
+        MockClock::advance(Duration::from_millis(1001));
+
+        assert_eq!(opt.get_or_insert(2), &mut 2);
+        assert_eq!(opt.get(), Some(&2));
+    }
+
+    #[test]
+    fn test_goi() {
+        let mut opt: EphemeralOption<u8> = EphemeralOption::new(1, Duration::from_secs(1));
+
+        assert_eq!(opt.get_or_insert(2), &mut 1);
+        assert_eq!(opt.get(), Some(&1));
+    }
+
+    #[test]
+    fn test_replace_empty() {
+        let mut opt: EphemeralOption<u8> = EphemeralOption::new_empty(Duration::from_secs(1));
+
+        assert_eq!(opt.replace(2), None);
+        assert_eq!(opt.get(), Some(&2));
+    }
+
+    #[test]
+    fn test_replace_expired() {
+        let mut opt: EphemeralOption<u8> = EphemeralOption::new(2, Duration::from_secs(1));
+
+        MockClock::advance(Duration::from_millis(1001));
+
+        assert_eq!(opt.replace(1), None);
+        assert_eq!(opt.get(), Some(&1));
+    }
+
+    #[test]
+    fn test_replace() {
+        let mut opt: EphemeralOption<u8> = EphemeralOption::new(2, Duration::from_secs(1));
+
+        assert_eq!(opt.replace(1), Some(2));
+        assert_eq!(opt.get(), Some(&1));
     }
 }
